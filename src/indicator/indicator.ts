@@ -100,8 +100,8 @@ export default class Indicator extends PanelMenu.Button {
 
         const newLayout = new Layout(
             [
-                new Tile({ x: 0, y: 0, width: 0.3, height: 1, groups: [1] }),
-                new Tile({ x: 0.3, y: 0, width: 0.7, height: 1, groups: [1] }),
+                new Tile({ x: 0, y: 0, width: 0.5, height: 1, groups: [1] }),
+                new Tile({ x: 0.5, y: 0, width: 0.5, height: 1, groups: [1] }),
             ],
             `${Shell.Global.get().get_current_time()}`,
         );

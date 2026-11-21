@@ -102,7 +102,7 @@ export default class EditorDialog extends ModalDialog.ModalDialog {
         );
         suggestion1.add_child(
             new St.Label({
-                text: ` ${_('to split a tile')}.`,
+                text: ` ${_('to split a tile (snaps to logical steps)')}.`,
                 xAlign: Clutter.ActorAlign.CENTER,
                 yAlign: Clutter.ActorAlign.CENTER,
                 styleClass: '',
@@ -144,6 +144,50 @@ export default class EditorDialog extends ModalDialog.ModalDialog {
         suggestion2.add_child(
             new St.Label({
                 text: ` ${_('to split a tile vertically')}.`,
+                xAlign: Clutter.ActorAlign.CENTER,
+                yAlign: Clutter.ActorAlign.CENTER,
+                styleClass: '',
+                xExpand: false,
+            }),
+        );
+
+        const suggestionShift = new St.BoxLayout();
+        // Hold SHIFT for freehand positioning
+        suggestionShift.add_child(
+            new St.Label({
+                text: 'SHIFT',
+                xAlign: Clutter.ActorAlign.CENTER,
+                yAlign: Clutter.ActorAlign.CENTER,
+                styleClass: 'button kbd',
+                xExpand: false,
+                pseudoClass: 'active',
+            }),
+        );
+        suggestionShift.add_child(
+            new St.Label({
+                text: ` ${_('hold while splitting or dragging a slider for freehand mode')}.`,
+                xAlign: Clutter.ActorAlign.CENTER,
+                yAlign: Clutter.ActorAlign.CENTER,
+                styleClass: '',
+                xExpand: false,
+            }),
+        );
+
+        const suggestionEqualize = new St.BoxLayout();
+        // DOUBLE CLICK slider to equalize 50/50
+        suggestionEqualize.add_child(
+            new St.Label({
+                text: 'DOUBLE CLICK',
+                xAlign: Clutter.ActorAlign.CENTER,
+                yAlign: Clutter.ActorAlign.CENTER,
+                styleClass: 'button kbd',
+                xExpand: false,
+                pseudoClass: 'active',
+            }),
+        );
+        suggestionEqualize.add_child(
+            new St.Label({
+                text: ` ${_('a slider to equalize adjacent tiles (50/50)')}.`,
                 xAlign: Clutter.ActorAlign.CENTER,
                 yAlign: Clutter.ActorAlign.CENTER,
                 styleClass: '',
@@ -205,6 +249,8 @@ export default class EditorDialog extends ModalDialog.ModalDialog {
         });
         legend.add_child(suggestion1);
         legend.add_child(suggestion2);
+        legend.add_child(suggestionShift);
+        legend.add_child(suggestionEqualize);
         legend.add_child(suggestion3);
         legend.add_child(suggestion4);
 

@@ -15,9 +15,10 @@ import TileUtils from '../layout/TileUtils';
 import Slider from './slider';
 import EditableTilePreview from './editableTilePreview';
 import Tile from '../layout/Tile';
-import HoverLine from './hoverLine';
+import HoverLine, { SplitPreviewInfo } from './hoverLine';
 import { Monitor } from 'resource:///org/gnome/shell/ui/layout.js';
 import { getEventCoords } from '../../utils/gnomesupport';
+import { computeEqualSplits, roundRatio, snapRatio } from './snapUtils';
 
 export default class LayoutEditor extends St.Widget {
     static { registerGObjectClass(this) }
@@ -69,7 +70,7 @@ export default class LayoutEditor extends St.Widget {
             (win) => win.can_minimize() && win.minimize(),
         );
 
-        this._hoverWidget = new HoverLine(this);
+        this._hoverWidget = new HoverLine(this, this._resolveSplit.bind(this));
 
         this._layout = layout;
         this._drawEditor();
@@ -86,7 +87,7 @@ export default class LayoutEditor extends St.Widget {
         // cleanup
         this.destroy_all_children();
         this._sliders = [];
-        this._hoverWidget = new HoverLine(this);
+        this._hoverWidget = new HoverLine(this, this._resolveSplit.bind(this));
 
         // change layout
         this._layout = newLayout;
@@ -114,11 +115,13 @@ export default class LayoutEditor extends St.Widget {
                 .flatMap((t) => [
                     {
                         c: Math.round(t.tile.x * 1000) / 1000,
+                        exactC: t.tile.x,
                         end: false,
                         r: t.rect.x,
                     },
                     {
                         c: Math.round((t.tile.x + t.tile.width) * 1000) / 1000,
+                        exactC: t.tile.x + t.tile.width,
                         end: true,
                         r: t.rect.x + t.rect.width,
                     },
@@ -127,11 +130,13 @@ export default class LayoutEditor extends St.Widget {
 
             let count = 0;
             let coord = -1;
+            let ratio = 0;
             let horizontal = false;
             for (const line of lines) {
                 count += line.end ? -1 : 1;
                 if (count === 0 && line !== lines[lines.length - 1]) {
                     coord = line.r;
+                    ratio = line.exactC;
                     horizontal = true;
                     break;
                 }
@@ -143,6 +148,7 @@ export default class LayoutEditor extends St.Widget {
                     .flatMap((t) => [
                         {
                             c: Math.round(t.tile.y * 1000) / 1000,
+                            exactC: t.tile.y,
                             end: false,
                             r: t.rect.y,
                         },
@@ -150,6 +156,7 @@ export default class LayoutEditor extends St.Widget {
                             c:
                                 Math.round((t.tile.y + t.tile.height) * 1000) /
                                 1000,
+                            exactC: t.tile.y + t.tile.height,
                             end: true,
                             r: t.rect.y + t.rect.height,
                         },
@@ -162,11 +169,12 @@ export default class LayoutEditor extends St.Widget {
                     count += line.end ? -1 : 1;
                     if (count === 0 && line !== lines[lines.length - 1]) {
                         coord = line.r;
+                        ratio = line.exactC;
                         break;
                     }
                 }
             }
-            const slider = this._buildSlider(horizontal, coord, groupdId);
+            const slider = this._buildSlider(horizontal, coord, ratio, groupdId);
             this._sliders.push(slider);
             tiles.forEach((editable) => slider.addTile(editable));
         });
@@ -196,6 +204,12 @@ export default class LayoutEditor extends St.Widget {
                 this.splitTile(editableTile);
             else if (clicked_button === 3) this.deleteTile(editableTile);
         });
+        editableTile.connect(
+            'split-equal',
+            (_, horizontal: boolean, count: number) => {
+                this.splitTileEqual(editableTile, horizontal, count);
+            },
+        );
         editableTile.connect('motion-event', (_, event: Clutter.Event) => {
             const [stageX, stageY] = getEventCoords(event);
             this._hoverWidget.handleMouseMove(
@@ -218,106 +232,217 @@ export default class LayoutEditor extends St.Widget {
         return editableTile;
     }
 
-    private splitTile(editableTile: EditableTilePreview) {
+    private _getReferenceSizes(horizontal: boolean, excludeTile?: Tile): number[] {
+        const sizes: number[] = [];
+        for (const tile of this._layout.tiles) {
+            if (tile === excludeTile) continue;
+            const size = roundRatio(horizontal ? tile.width : tile.height);
+            if (size <= 0 || size >= 0.99) continue;
+            if (!sizes.some((s) => Math.abs(s - size) < 0.001)) {
+                sizes.push(size);
+            }
+        }
+        return sizes;
+    }
+
+    private _resolveSplit(
+        editableTile: EditableTilePreview,
+        x: number,
+        y: number,
+        splitHorizontally: boolean,
+        freehand: boolean,
+    ): SplitPreviewInfo | null {
+        const tile = editableTile.tile;
+        const containerSpan = splitHorizontally
+            ? this._containerRect.width
+            : this._containerRect.height;
+        const tileStart = splitHorizontally ? tile.x : tile.y;
+        const tileSize = splitHorizontally ? tile.width : tile.height;
+        const tileEnd = roundRatio(tileStart + tileSize);
+
+        const minSizeRatio = EditableTilePreview.MIN_TILE_SIZE / containerSpan;
+        const minRatio = tileStart + minSizeRatio;
+        const maxRatio = tileEnd - minSizeRatio;
+        if (minRatio > maxRatio) return null;
+
+        const rawRatio = (splitHorizontally ? x : y) / containerSpan;
+        const refSizes = this._getReferenceSizes(splitHorizontally, tile);
+        const extraStops: number[] = [];
+        for (const size of refSizes) {
+            extraStops.push(tileStart + size);
+            extraStops.push(tileEnd - size);
+        }
+
+        const ratio = snapRatio({
+            rawRatio,
+            minRatio,
+            maxRatio,
+            spanStart: tileStart,
+            spanEnd: tileEnd,
+            extraStops,
+            freehand,
+        });
+
+        const prevSizeRatio = roundRatio(ratio - tileStart);
+        const nextSizeRatio = roundRatio(tileEnd - ratio);
+        if (
+            Math.round(prevSizeRatio * containerSpan) <
+                EditableTilePreview.MIN_TILE_SIZE ||
+            Math.round(nextSizeRatio * containerSpan) <
+                EditableTilePreview.MIN_TILE_SIZE
+        )
+            return null;
+
+        return {
+            ratio,
+            coord: Math.round(ratio * containerSpan),
+            prevSizeRatio,
+            nextSizeRatio,
+        };
+    }
+
+    private _applySplit(
+        editableTile: EditableTilePreview,
+        newTiles: Tile[],
+        splitHorizontally: boolean,
+    ) {
         const oldTile = editableTile.tile;
         const index = this._layout.tiles.indexOf(oldTile);
-        if (index < 0) return;
+        if (index < 0 || newTiles.length < 2) return;
 
-        const [x, y, modifier] = global.get_pointer();
-        const splitX = (x - this.x) / this._containerRect.width;
-        const splitY = (y - this.y) / this._containerRect.height;
-        // split horizontally when CTRL is NOT pressed, split vertically instead
-        const splitHorizontally =
-            (modifier & Clutter.ModifierType.CONTROL_MASK) === 0;
-
-        const prevTile = new Tile({
-            x: oldTile.x,
-            y: oldTile.y,
-            width: splitHorizontally ? splitX - oldTile.x : oldTile.width,
-            height: splitHorizontally ? oldTile.height : splitY - oldTile.y,
-            groups: [],
-        });
-
-        const nextTile = new Tile({
-            x: splitHorizontally ? splitX : oldTile.x,
-            y: splitHorizontally ? oldTile.y : splitY,
-            width: splitHorizontally
-                ? oldTile.width - prevTile.width
-                : oldTile.width,
-            height: splitHorizontally
-                ? oldTile.height
-                : oldTile.height - prevTile.height,
-            groups: [],
-        });
-
-        const prevRect = TileUtils.apply_props(prevTile, this._containerRect);
-        const nextRect = TileUtils.apply_props(nextTile, this._containerRect);
-        if (
-            prevRect.height < EditableTilePreview.MIN_TILE_SIZE ||
-            prevRect.width < EditableTilePreview.MIN_TILE_SIZE ||
-            nextRect.height < EditableTilePreview.MIN_TILE_SIZE ||
-            nextRect.width < EditableTilePreview.MIN_TILE_SIZE
-        )
-            return;
-
-        this._layout.tiles[index] = prevTile;
-        this._layout.tiles.push(nextTile);
-
-        const prevEditableTile = this._buildEditableTile(prevTile, prevRect);
-        const nextEditableTile = this._buildEditableTile(nextTile, nextRect);
-
-        const slider = this._buildSlider(
-            splitHorizontally,
-            splitHorizontally
-                ? nextEditableTile.rect.x
-                : nextEditableTile.rect.y,
+        const newRects = newTiles.map((t) =>
+            TileUtils.apply_props(t, this._containerRect),
         );
-        this._sliders.push(slider);
-        slider.addTile(prevEditableTile);
-        slider.addTile(nextEditableTile);
+        for (const rect of newRects) {
+            if (
+                rect.height < EditableTilePreview.MIN_TILE_SIZE ||
+                rect.width < EditableTilePreview.MIN_TILE_SIZE
+            )
+                return;
+        }
+
+        this._layout.tiles[index] = newTiles[0];
+        for (let i = 1; i < newTiles.length; i++) {
+            this._layout.tiles.push(newTiles[i]);
+        }
+
+        const newEditableTiles = newTiles.map((t, i) =>
+            this._buildEditableTile(t, newRects[i]),
+        );
+
+        // Create sliders between each adjacent pair of new tiles
+        for (let i = 0; i < newEditableTiles.length - 1; i++) {
+            const prevEditable = newEditableTiles[i];
+            const nextEditable = newEditableTiles[i + 1];
+            const sliderRatio = splitHorizontally
+                ? nextEditable.tile.x
+                : nextEditable.tile.y;
+            const sliderCoord = splitHorizontally
+                ? nextEditable.rect.x
+                : nextEditable.rect.y;
+            const slider = this._buildSlider(
+                splitHorizontally,
+                sliderCoord,
+                sliderRatio,
+            );
+            this._sliders.push(slider);
+            slider.addTile(prevEditable);
+            slider.addTile(nextEditable);
+        }
+
+        const firstEditable = newEditableTiles[0];
+        const lastEditable = newEditableTiles[newEditableTiles.length - 1];
 
         if (splitHorizontally) {
             editableTile
                 .getSlider(St.Side.TOP)
-                ?.onTileSplit(editableTile, [
-                    prevEditableTile,
-                    nextEditableTile,
-                ]);
+                ?.onTileSplit(editableTile, newEditableTiles);
             editableTile
                 .getSlider(St.Side.BOTTOM)
-                ?.onTileSplit(editableTile, [
-                    prevEditableTile,
-                    nextEditableTile,
-                ]);
+                ?.onTileSplit(editableTile, newEditableTiles);
             editableTile
                 .getSlider(St.Side.LEFT)
-                ?.onTileSplit(editableTile, [prevEditableTile]);
+                ?.onTileSplit(editableTile, [firstEditable]);
             editableTile
                 .getSlider(St.Side.RIGHT)
-                ?.onTileSplit(editableTile, [nextEditableTile]);
+                ?.onTileSplit(editableTile, [lastEditable]);
         } else {
             editableTile
                 .getSlider(St.Side.LEFT)
-                ?.onTileSplit(editableTile, [
-                    prevEditableTile,
-                    nextEditableTile,
-                ]);
+                ?.onTileSplit(editableTile, newEditableTiles);
             editableTile
                 .getSlider(St.Side.RIGHT)
-                ?.onTileSplit(editableTile, [
-                    prevEditableTile,
-                    nextEditableTile,
-                ]);
+                ?.onTileSplit(editableTile, newEditableTiles);
             editableTile
                 .getSlider(St.Side.TOP)
-                ?.onTileSplit(editableTile, [prevEditableTile]);
+                ?.onTileSplit(editableTile, [firstEditable]);
             editableTile
                 .getSlider(St.Side.BOTTOM)
-                ?.onTileSplit(editableTile, [nextEditableTile]);
+                ?.onTileSplit(editableTile, [lastEditable]);
         }
 
         this._hoverWidget.handleTileDestroy(editableTile);
         editableTile.destroy();
+    }
+
+    private splitTile(editableTile: EditableTilePreview) {
+        const oldTile = editableTile.tile;
+        const [x, y, modifier] = global.get_pointer();
+        // split horizontally when CTRL is NOT pressed, split vertically instead
+        const splitHorizontally =
+            (modifier & Clutter.ModifierType.CONTROL_MASK) === 0;
+        const freehand = (modifier & Clutter.ModifierType.SHIFT_MASK) !== 0;
+
+        const split = this._resolveSplit(
+            editableTile,
+            x - this.x,
+            y - this.y,
+            splitHorizontally,
+            freehand,
+        );
+        if (!split) return;
+
+        const prevTile = new Tile({
+            x: oldTile.x,
+            y: oldTile.y,
+            width: splitHorizontally ? split.prevSizeRatio : oldTile.width,
+            height: splitHorizontally ? oldTile.height : split.prevSizeRatio,
+            groups: [],
+        });
+
+        const nextTile = new Tile({
+            x: splitHorizontally ? split.ratio : oldTile.x,
+            y: splitHorizontally ? oldTile.y : split.ratio,
+            width: splitHorizontally ? split.nextSizeRatio : oldTile.width,
+            height: splitHorizontally ? oldTile.height : split.nextSizeRatio,
+            groups: [],
+        });
+
+        this._applySplit(editableTile, [prevTile, nextTile], splitHorizontally);
+    }
+
+    private splitTileEqual(
+        editableTile: EditableTilePreview,
+        splitHorizontally: boolean,
+        count: number,
+    ) {
+        const oldTile = editableTile.tile;
+        const start = splitHorizontally ? oldTile.x : oldTile.y;
+        const size = splitHorizontally ? oldTile.width : oldTile.height;
+        const segments = computeEqualSplits(start, size, count);
+
+        const newTiles = segments.map(
+            (seg) =>
+                new Tile({
+                    x: splitHorizontally ? seg.start : oldTile.x,
+                    y: splitHorizontally ? oldTile.y : seg.start,
+                    width: splitHorizontally ? seg.size : oldTile.width,
+                    height: splitHorizontally ? oldTile.height : seg.size,
+                    groups: [],
+                }),
+        );
+
+        this._applySplit(editableTile, newTiles, splitHorizontally);
     }
 
     private deleteTile(editableTile: EditableTilePreview) {
@@ -345,6 +470,7 @@ export default class LayoutEditor extends St.Widget {
     private _buildSlider(
         isHorizontal: boolean,
         coord: number,
+        ratio: number,
         groupId?: number,
     ): Slider {
         if (!groupId) {
@@ -357,7 +483,16 @@ export default class LayoutEditor extends St.Widget {
                 }
             }
         }
-        return new Slider(this, groupId, coord, coord, isHorizontal);
+        return new Slider(
+            this,
+            groupId,
+            coord,
+            coord,
+            isHorizontal,
+            this._containerRect,
+            ratio,
+            (horiz) => this._getReferenceSizes(horiz),
+        );
     }
 
     private _onDestroy() {
